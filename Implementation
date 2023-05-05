@@ -1,0 +1,60 @@
+!pip install dm-haiku
+!pip install optax
+import dataclasses
+import haiku as hk
+import jax
+import jax.numpy as jnp
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+import optax
+from sklearn import decomposition
+from sklearn import preprocessing
+from sklearn import utils
+import tensorflow_datasets as tfds
+import tqdm
+from typing import Tuple
+# Define the reconstructor network architecture.
+def reconstructor_network_forward(params):
+  """Reconstructor network architecture."""
+  net = hk.nets.MLP([1000, 1000, 784],
+                    activation=jax.nn.relu,
+                    activate_final=False)
+  return net(params)
+# Set up the reconstructor network and optimizer.
+reconstructor_network = hk.without_apply_rng(
+    hk.transform(reconstructor_network_forward))
+opt_init, opt_update = optax.rmsprop(reconstructor_lr)
+The network is defined using Haiku, a neural network library built on top of JAX. The architecture consists of a multi-layer perceptron (MLP) with 1000 hidden units in each of the two hidden layers, and 784 output units in the final layer corresponding to the pixel values of the reconstructed image.
+The reconstructor network is then set up by initializing the network with the defined architecture and creating an optimizer using the RMSprop algorithm. The hk.without_apply_rng function is used to ensure that the network's weights are not affected by random number generation.
+Overall, this sets up the framework for the reconstructor network and optimizer that will be used to optimize the reconstruction of compressed images. Correlation between metrics, and quality of reconstruction as a function of the number of shadow models.
+ 
+# Define the loss functions for the reconstructor network.
+@jax.jit
+def mse_loss(reconstructor_params, params_batch, images_batch):
+  """MSE loss between reconstruction and target."""
+  batch_size = params_batch.shape[0]
+  images_batch_logits = reconstructor_network.apply(reconstructor_params,
+                                                  params_batch)
+  images_batch_pred = jax.nn.sigmoid(images_batch_logits)
+  return jnp.mean(jnp.mean((images_batch_pred - images_batch)**2, axis=1))
+@jax.jit
+def mae_loss(reconstructor_params, params_batch, images_batch):
+  """MAE loss between reconstruction and target."""
+  batch_size = params_batch.shape[0]
+  images_batch_logits = reconstructor_network.apply(reconstructor_params,
+                                                  params_batch)
+  images_batch_pred = jax.nn.sigmoid(images_batch_logits)
+  return jnp.mean(jnp.mean(jnp.abs(images_batch_pred - images_batch), axis=1))
+@jax.jit
+def mse_and_mae_loss(reconstructor_params, params_batch, images_batch):
+  """MSE and MAE loss between reconstruction and target."""
+  mae = mae_loss(reconstructor_params, params_batch, images_batch)
+  mse = mse_loss(reconstructor_params, params_batch, images_batch)
+  return mae + mse, (mae, mse)
+# Define the update function for the reconstructor network.
+@jax.jit
+def reconstructor_network_update(reconstructor_params, opt_state, params_batch,
+                                 images_batch):
+  (loss, (_, _)), gradient = jax.value_and_grad(
+      mse_and_mae_loss, has_aux=True

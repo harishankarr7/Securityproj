@@ -1,0 +1,110 @@
+# First, we define a shadow model and optimizer.
+import dataclasses
+import haiku as hk
+import jax
+import jax.numpy as jnp
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+import optax
+from sklearn import decomposition
+from sklearn import preprocessing
+from sklearn import utils
+import tensorflow_datasets as tfds
+import tqdm
+from typing import Tuple
+
+shadow_model_lr = 1e-1
+shadow_model_seed = 0
+num_shadow_model_epochs = 30
+num_in_shadow_train = 5000
+num_in_shadow_eval = 1000
+def shadow_model_forward(images):
+  """Shadow model architecture."""
+  net = hk.nets.MLP([10, 10], activation=jax.nn.elu, activate_final=False)
+  return net(images)
+shadow_model = hk.without_apply_rng(hk.transform(shadow_model_forward))
+opt_init, opt_update = optax.sgd(shadow_model_lr, momentum=0.9)
+# Next, we define functions to train the shadow models and calculate their accuracy.
+@jax.jit
+def xe_loss(params, images, labels):
+  """Cross-entropy loss."""
+  batch_size = images.shape[0]
+  logits = shadow_model.apply(params, images)
+  log_probs = jax.nn.log_softmax(logits)
+  return -jnp.sum(hk.one_hot(labels, 10) * log_probs) / batch_size
+@jax.jit
+def shadow_model_accuracy(params, images, labels):
+  """Prediction accuracy."""
+  predictions = shadow_model.apply(params, images)
+  return jnp.mean(jnp.argmax(predictions, axis=-1) == labels)
+@jax.jit
+def shadow_model_update(params, opt_state, images_batch, labels_batch):
+  gradient = jax.grad(xe_loss)(params, images_batch, labels_batch)
+  updates, opt_state = opt_update(gradient, opt_state)
+  new_params = optax.apply_updates(params, updates)
+  return new_params, opt_state
+def shadow_model_train(step_fn, images_train, labels_train, images_test,
+                       labels_test, num_epochs):
+  rng = jax.random.PRNGKey(shadow_model_seed)
+  image = jnp.ones([1, len(images_train[-1])])
+  params = shadow_model.init(rng, image)
+  opt_state = opt_init(params)
+  for _ in range(num_epochs):
+    params, opt_state = step_fn(params, opt_state, images_train, labels_train)
+  test_acc = shadow_model_accuracy(params, images_test, labels_test)
+  return params, test_acc
+# We then define a function to create a shadow model for a given target dataset and train the shadow model on that dataset.
+def create_shadow_model(images, labels, add_position):
+  """Generates target and trains shadow model on fixed dataset + target."""
+  add_position = jnp.minimum(add_position, len(labels) - 1)
+  image_add = jax.lax.dynamic_slice_in_dim(images, add_position, 1)
+  label_add = jax.lax.dynamic_slice_in_dim(labels, add_position, 1)
+  # Add additional target to training set.
+  images_train = jnp.concatenate([fixed_set.images, image_add])
+  labels_train = jnp.concatenate([fixed_set.labels, label_add])
+
+# PCA on shadow model params
+pca = decomposition.PCA(n_components=2)
+pca.fit(np.concatenate([shadow_train_params, shadow_eval_params]))
+shadow_train_params_pca = pca.transform(shadow_train_params)
+shadow_eval_params_pca = pca.transform(shadow_eval_params)
+
+# PCA on rescaled shadow model params
+pca = decomposition.PCA(n_components=2)
+pca.fit(
+    np.concatenate([shadow_train_rescaled_params, shadow_eval_rescaled_params]))
+shadow_train_params_scaled_pca = pca.transform(shadow_train_rescaled_params)
+shadow_eval_params_scaled_pca = pca.transform(shadow_eval_rescaled_params)
+# Plot PCA
+fig, [ax1, ax2] = plt.subplots(nrows=1, ncols=2, figsize=(8,3))
+ax1.scatter(
+    shadow_train_params_pca[:, 0],
+    shadow_train_params_pca[:, 1],
+    label='Shadow train',
+    alpha=.5)
+ax1.scatter(
+    shadow_eval_params_pca[:, 0],
+    shadow_eval_params_pca[:, 1],
+    label='Shadow test',
+    alpha=.5)
+ax1.set_title('PCA of params')
+ax1.legend(loc='best')
+ax2.scatter(
+    shadow_train_params_scaled_pca[:, 0],
+    shadow_train_params_scaled_pca[:, 1],
+    label='Shadow train',
+    alpha=.5)
+ax2.scatter(
+    shadow_eval_params_scaled_pca[:, 0],
+    shadow_eval_params_scaled_pca[:, 1],
+    label='Shadow test',
+    alpha=.5)
+ax2.set_title('PCA of params after pre-processing')
+ax2.legend(loc='best')
+
+# Create new training and eval dataset for reconstruction task.
+reconstruction_train_data = ReconstructionDataset(
+    params=shadow_train_rescaled_params, images=shadow_train_data.images)
+reconstruction_eval_data = ReconstructionDataset(
+    params=shadow_eval_rescaled_params, images=shadow_eval_data.images)
